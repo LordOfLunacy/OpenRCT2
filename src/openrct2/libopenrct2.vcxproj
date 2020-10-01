@@ -277,6 +277,7 @@
     <ClInclude Include="paint\VirtualFloor.h" />
     <ClInclude Include="ParkImporter.h" />
     <ClInclude Include="peep\GuestPathfinding.h" />
+    <ClInclude Include="peep\PathGraph.h" />
     <ClInclude Include="peep\Peep.h" />
     <ClInclude Include="peep\Staff.h" />
     <ClInclude Include="PlatformEnvironment.h" />
@@ -614,6 +615,7 @@
     <ClCompile Include="ParkImporter.cpp" />
     <ClCompile Include="peep\Guest.cpp" />
     <ClCompile Include="peep\GuestPathfinding.cpp" />
+    <ClCompile Include="peep\PathGraph.cpp" />
     <ClCompile Include="peep\Peep.cpp" />
     <ClCompile Include="peep\PeepData.cpp" />
     <ClCompile Include="peep\Staff.cpp" />

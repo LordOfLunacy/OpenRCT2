@@ -23,6 +23,7 @@
 #include "localisation/Localisation.h"
 #include "management/NewsItem.h"
 #include "network/network.h"
+#include "peep/PathGraph.h"
 #include "peep/Staff.h"
 #include "platform/Platform2.h"
 #include "scenario/Scenario.h"
@@ -284,6 +285,7 @@ void GameState::UpdateLogic()
     // Temporarily remove provisional paths to prevent peep from interacting with them
     map_remove_provisional_elements();
     map_update_path_wide_flags();
+    GuestPathfinding::Update();
     peep_update_all();
     map_restore_provisional_elements();
     vehicle_update_all();
