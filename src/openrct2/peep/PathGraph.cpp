@@ -8,6 +8,8 @@
 #include <memory>
 #include <optional>
 #include <tuple>
+#include <string>
+#include <sstream>
 #include <vector>
 
 using namespace OpenRCT2;
@@ -19,11 +21,13 @@ class PathGraph
 static uint32_t _lastGenerate;
 static PathGraph _pathGraph;
 
-class PathNode
+template<typename T>
+class PathNodeBase
 {
 public:
+    uint32_t id{};
     CoordsXYZ coords{};
-    std::array<PathNode*, 4> edges;
+    std::array<T*, 4> edges;
 
     size_t GetNumEdges()
     {
@@ -37,11 +41,12 @@ public:
     }
 };
 
-class JunctionNode
+class PathNode : public PathNodeBase<PathNode>
 {
-public:
-    CoordsXYZ coords{};
-    std::array<JunctionNode*, 4> edges;
+};
+
+class JunctionNode : public PathNodeBase<JunctionNode>
+{
 };
 
 class TileElementWithCoords
@@ -155,6 +160,7 @@ public:
     {
         auto node = new T();
         nodes.push_back(node);
+        node->id = static_cast<uint32_t>(nodes.size());
         node->coords = coords;
         nodeMap.Add(node);
         return node;
@@ -277,12 +283,13 @@ private:
             for (auto d : ALL_DIRECTIONS)
             {
                 auto edge = target->edges[d];
-                if (edge != nullptr && edge != src)
+                if (edge != nullptr)
                 {
                     result->edges[d] = ExpandJunction(target, edge);
                 }
             }
 
+            assert(result->GetNumEdges() == target->GetNumEdges());
             return result;
         }
         else
@@ -324,7 +331,61 @@ public:
             }
         }
         ExpandJunctions();
+        DumpGraph("graph.graphml");
         return {};
+    }
+
+    void DumpGraph(const std::string& path)
+    {
+        // Dump graph compatible with https://www.yworks.com/yed-live/
+        std::stringstream sb;
+        sb << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+        sb << "<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\"\n";
+        sb << "         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n";
+        sb << "         xmlns:y=\"http://www.yworks.com/xml/yfiles-common/3.0\"\n";
+        sb << "         xmlns:yjs=\"http://www.yworks.com/xml/yfiles-for-html/2.0/xaml\"\n";
+        sb << "         xsi:schemaLocation=\"http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd\">\n";
+        sb << "    <key id=\"d5\" for=\"node\" attr.name=\"NodeGeometry\" y:attr.uri=\"http://www.yworks.com/xml/yfiles-common/2.0/NodeGeometry\"/>\n";
+        sb << "    <key id=\"d7\" for=\"node\" attr.name=\"NodeStyle\" y:attr.uri=\"http://www.yworks.com/xml/yfiles-common/2.0/NodeStyle\"/>\n";
+        sb << "    <graph id=\"G\" edgedefault=\"directed\">\n";
+        for (auto n : _nodes.nodes)
+        {
+            DumpNode(sb, n, "n", "#FFFF0000");
+        }
+        for (auto n : _junctionNodes.nodes)
+        {
+            DumpNode(sb, n, "j", "#FF0000FF");
+        }
+        sb << "    </graph>\n";
+        sb << "</graphml>\n";
+        auto str = sb.str();
+
+        auto f = std::fopen(path.c_str(), "wb");
+        if (f != nullptr)
+        {
+            std::fwrite(str.c_str(), 1, str.size(), f);
+            std::fclose(f);
+        }
+    }
+
+    template<typename T>
+    void DumpNode(std::stringstream& sb, T* n, const std::string& type, const std::string& colour)
+    {
+        sb << "        <node id=\"" << type << n->id << "\">\n";
+        sb << "            <data key=\"d5\">\n";
+        sb << "                <y:RectD X=\"" << ((32 * 256) - n->coords.x) << "\" Y=\"" << n->coords.y << "\" Width=\"16\" Height=\"16\" />\n";
+        sb << "            </data>\n";
+        sb << "            <data key=\"d7\">\n";
+        sb << "                <yjs:ShapeNodeStyle stroke=\"" << colour << "\" fill=\"" << colour << "\" />\n";
+        sb << "            </data>\n";
+        sb << "        </node>\n";
+        for (auto d : ALL_DIRECTIONS)
+        {
+            if (n->edges[d] != nullptr)
+            {
+                sb << "        <edge source=\"" << type << n->id << "\" target=\"" << type << n->edges[d]->id << "\"/>\n";
+            }
+        }
     }
 };
 
