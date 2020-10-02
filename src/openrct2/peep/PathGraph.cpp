@@ -7,9 +7,9 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <tuple>
-#include <string>
 #include <sstream>
+#include <string>
+#include <tuple>
 #include <vector>
 
 using namespace OpenRCT2;
@@ -21,8 +21,7 @@ class PathGraph
 static uint32_t _lastGenerate;
 static PathGraph _pathGraph;
 
-template<typename T>
-class PathNodeBase
+template<typename T> class PathNodeBase
 {
 public:
     uint32_t id{};
@@ -62,8 +61,7 @@ public:
     }
 };
 
-/*
-class QuadTree
+template<typename T> class QuadTree
 {
 private:
     static constexpr size_t MAX_CHILDREN = 4;
@@ -71,16 +69,19 @@ private:
     struct Node
     {
         std::array<std::unique_ptr<Node>, 4> children;
-        std::vector<PathNode*> nodes;
+        std::vector<T*> nodes;
         CoordsRange<CoordsXY> range;
         bool isLeaf = true;
 
+        Node(CoordsRange<CoordsXY> r)
+            : range(r)
+        {
+        }
+
         bool Contains(CoordsXY coords)
         {
-            if (coords.x >= range.Point1.x &&
-                coords.y >= range.Point1.y &&
-                coords.x < range.Point2.x &&
-                coords.y < range.Point2.y)
+            if (coords.x >= range.Point1.x && coords.y >= range.Point1.y && coords.x < range.Point2.x
+                && coords.y < range.Point2.y)
             {
                 return true;
             }
@@ -89,9 +90,44 @@ private:
 
         void Split()
         {
+            assert(nodes.size() != 0);
+
+            uint32_t midX{}, midY{};
+            for (auto node : nodes)
+            {
+                midX += node->coords.x;
+                midY += node->coords.y;
+            }
+            midX /= static_cast<uint32_t>(nodes.size());
+            midY /= static_cast<uint32_t>(nodes.size());
+
+            children[0] = std::make_unique<Node>(CoordsRange<CoordsXY>(range.Point1.x, range.Point1.y, midX, midY));
+            children[1] = std::make_unique<Node>(CoordsRange<CoordsXY>(midX, range.Point1.y, range.Point2.x, midY));
+            children[2] = std::make_unique<Node>(CoordsRange<CoordsXY>(range.Point1.x, midY, midX, range.Point2.y));
+            children[3] = std::make_unique<Node>(CoordsRange<CoordsXY>(midX, midY, range.Point2.x, range.Point2.y));
+            isLeaf = false;
+
+            for (auto node : nodes)
+            {
+                Add(node);
+            }
+            nodes = {};
         }
 
-        bool Add(PathNode* node)
+        bool ShouldSplit() const
+        {
+            if (nodes.size() > MAX_CHILDREN)
+            {
+                auto size = static_cast<int64_t>(range.Point2.x) - range.Point1.x;
+                if (size > 128)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool Add(T* node)
         {
             if (!Contains(node->coords))
                 return false;
@@ -99,7 +135,7 @@ private:
             if (isLeaf)
             {
                 nodes.push_back(node);
-                if (nodes.size() > MAX_CHILDREN)
+                if (ShouldSplit())
                 {
                     Split();
                 }
@@ -114,39 +150,56 @@ private:
                     }
                 }
             }
+
+            return true;
+        }
+
+        T* Find(CoordsXYZ coords)
+        {
+            if (!Contains(coords))
+                return nullptr;
+
+            if (isLeaf)
+            {
+                for (auto node : nodes)
+                {
+                    if (node->coords == coords)
+                    {
+                        return node;
+                    }
+                }
+            }
+            else
+            {
+                for (auto& child : children)
+                {
+                    if (child)
+                    {
+                        auto node = child->Find(coords);
+                        if (node != nullptr)
+                        {
+                            return node;
+                        }
+                    }
+                }
+            }
+
+            return nullptr;
         }
     };
-    Node root;
-
-public:
-    void Add(PathNode* node)
-    {
-        root.Add(node);
-    }
-};
-*/
-
-template<typename T> class NodeMap
-{
-private:
-    std::vector<T*> _nodes;
+    Node root = Node(CoordsRange<CoordsXY>(
+        std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::min(), std::numeric_limits<int32_t>::max(),
+        std::numeric_limits<int32_t>::max()));
 
 public:
     void Add(T* node)
     {
-        _nodes.push_back(node);
+        root.Add(node);
     }
 
     T* Find(CoordsXYZ coords)
     {
-        for (auto node : _nodes)
-        {
-            if (node->coords == coords)
-            {
-                return node;
-            }
-        }
-        return nullptr;
+        return root.Find(coords);
     }
 };
 
@@ -154,7 +207,7 @@ template<typename T> class NodePool
 {
 public:
     std::vector<T*> nodes;
-    NodeMap<T> nodeMap;
+    QuadTree<T> nodeMap;
 
     T* Allocate(CoordsXYZ coords)
     {
@@ -345,8 +398,10 @@ public:
         sb << "         xmlns:y=\"http://www.yworks.com/xml/yfiles-common/3.0\"\n";
         sb << "         xmlns:yjs=\"http://www.yworks.com/xml/yfiles-for-html/2.0/xaml\"\n";
         sb << "         xsi:schemaLocation=\"http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd\">\n";
-        sb << "    <key id=\"d5\" for=\"node\" attr.name=\"NodeGeometry\" y:attr.uri=\"http://www.yworks.com/xml/yfiles-common/2.0/NodeGeometry\"/>\n";
-        sb << "    <key id=\"d7\" for=\"node\" attr.name=\"NodeStyle\" y:attr.uri=\"http://www.yworks.com/xml/yfiles-common/2.0/NodeStyle\"/>\n";
+        sb << "    <key id=\"d5\" for=\"node\" attr.name=\"NodeGeometry\" "
+              "y:attr.uri=\"http://www.yworks.com/xml/yfiles-common/2.0/NodeGeometry\"/>\n";
+        sb << "    <key id=\"d7\" for=\"node\" attr.name=\"NodeStyle\" "
+              "y:attr.uri=\"http://www.yworks.com/xml/yfiles-common/2.0/NodeStyle\"/>\n";
         sb << "    <graph id=\"G\" edgedefault=\"directed\">\n";
         for (auto n : _nodes.nodes)
         {
@@ -368,12 +423,12 @@ public:
         }
     }
 
-    template<typename T>
-    void DumpNode(std::stringstream& sb, T* n, const std::string& type, const std::string& colour)
+    template<typename T> void DumpNode(std::stringstream& sb, T* n, const std::string& type, const std::string& colour)
     {
         sb << "        <node id=\"" << type << n->id << "\">\n";
         sb << "            <data key=\"d5\">\n";
-        sb << "                <y:RectD X=\"" << ((32 * 256) - n->coords.x) << "\" Y=\"" << n->coords.y << "\" Width=\"16\" Height=\"16\" />\n";
+        sb << "                <y:RectD X=\"" << ((32 * 256) - n->coords.x) << "\" Y=\"" << n->coords.y
+           << "\" Width=\"16\" Height=\"16\" />\n";
         sb << "            </data>\n";
         sb << "            <data key=\"d7\">\n";
         sb << "                <yjs:ShapeNodeStyle stroke=\"" << colour << "\" fill=\"" << colour << "\" />\n";
