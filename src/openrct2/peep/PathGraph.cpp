@@ -1,12 +1,14 @@
 
 #include "PathGraph.h"
 
+#include "../ride/Ride.h"
 #include "../world/Map.h"
 
 #include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -21,12 +23,63 @@ class PathGraph
 static uint32_t _lastGenerate;
 static PathGraph _pathGraph;
 
+class ParkNavNode;
+
 template<typename T> class PathNodeBase
 {
 public:
     uint32_t id{};
     CoordsXYZ coords{};
-    std::array<T*, 4> edges;
+};
+
+struct RideStationId
+{
+    ride_id_t Ride = RIDE_ID_NULL;
+    StationIndex Station = STATION_INDEX_NULL;
+
+    RideStationId() = default;
+    RideStationId(ride_id_t ride, StationIndex station)
+        : Ride(ride)
+        , Station(station)
+    {
+    }
+
+    friend bool operator==(const RideStationId& lhs, const RideStationId& rhs)
+    {
+        return lhs.Ride == rhs.Ride && lhs.Station == rhs.Station;
+    }
+
+    friend bool operator!=(const RideStationId& lhs, const RideStationId& rhs)
+    {
+        return !(lhs == rhs);
+    }
+};
+
+class PathNode : public PathNodeBase<PathNode>
+{
+public:
+    std::array<PathNode*, 4> edges;
+    std::array<RideStationId, 4> entrance;
+    std::array<RideStationId, 4> exit;
+    ParkNavNode* blue;
+    bool navDone{};
+
+    uint32_t GetEdgeTarget(size_t index)
+    {
+        size_t c = 0;
+        for (auto edge : edges)
+        {
+            if (edge != nullptr)
+            {
+                if (c == index)
+                {
+                    return edge->id;
+                }
+                c++;
+            }
+        }
+        return std::numeric_limits<uint32_t>::max();
+    }
 
     size_t GetNumEdges()
     {
@@ -40,21 +93,82 @@ public:
     }
 };
 
-class PathNode : public PathNodeBase<PathNode>
-{
-};
-
 class JunctionNode : public PathNodeBase<JunctionNode>
 {
+public:
+    std::array<JunctionNode*, 4> edges;
+
+    uint32_t GetEdgeTarget(size_t index)
+    {
+        size_t c = 0;
+        for (auto edge : edges)
+        {
+            if (edge != nullptr)
+            {
+                if (c == index)
+                {
+                    return edge->id;
+                }
+                c++;
+            }
+        }
+        return std::numeric_limits<uint32_t>::max();
+    }
+
+    size_t GetNumEdges()
+    {
+        size_t c = 0;
+        for (auto edge : edges)
+        {
+            if (edge != nullptr)
+                c++;
+        }
+        return c;
+    }
 };
 
-class TileElementWithCoords
+class ParkNavNode : public PathNodeBase<JunctionNode>
+{
+public:
+    struct Edge
+    {
+        ride_id_t ViaRide = RIDE_ID_NULL;
+        ParkNavNode* Target{};
+    };
+
+    PathNode* red{};
+    std::vector<Edge> edges;
+
+    bool HasEdgeTo(ParkNavNode* target) const
+    {
+        for (const auto& edge : edges)
+        {
+            if (edge.Target == target)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    uint32_t GetEdgeTarget(size_t index) const
+    {
+        return edges[index].Target->id;
+    }
+
+    size_t GetNumEdges() const
+    {
+        return edges.size();
+    }
+};
+
+class ConnectedElement
 {
 public:
     CoordsXYZ coords;
-    PathElement* element;
+    TileElement* element;
 
-    TileElementWithCoords(CoordsXYZ c, PathElement* el)
+    ConnectedElement(CoordsXYZ c, TileElement* el)
         : coords(c)
         , element(el)
     {
@@ -225,6 +339,7 @@ class GraphBuilder
 private:
     NodePool<PathNode> _nodes;
     NodePool<JunctionNode> _junctionNodes;
+    NodePool<ParkNavNode> _parkNavNodes;
 
 public:
     GraphBuilder()
@@ -259,8 +374,15 @@ private:
         return true;
     }
 
-    static std::optional<TileElementWithCoords> GetConnectedElement(CoordsXYZ loc, const PathElement* srcElement, Direction d)
+    static std::optional<ConnectedElement> GetConnectedElement(CoordsXYZ loc, const PathElement* srcElement, Direction d)
     {
+        // Ignore direction if path has no edge to it
+        auto edges = srcElement->GetEdges();
+        if (!(edges & (1 << d)))
+        {
+            return {};
+        }
+
         loc += CoordsDirectionDelta[d];
         if (srcElement->IsSloped() && srcElement->GetSlopeDirection() == d)
         {
@@ -272,12 +394,32 @@ private:
         {
             do
             {
-                if (!el->IsGhost())
+                if (el->IsGhost())
+                    continue;
+
+                switch (el->GetType())
                 {
-                    auto pathEl = el->AsPath();
-                    if (pathEl != nullptr && IsValidPathZAndDirection(pathEl, loc.z, d))
+                    case TILE_ELEMENT_TYPE_PATH:
                     {
-                        return TileElementWithCoords(loc, pathEl);
+                        auto pathEl = el->AsPath();
+                        if (pathEl != nullptr && IsValidPathZAndDirection(pathEl, loc.z, d))
+                        {
+                            return ConnectedElement(loc, el);
+                        }
+                        break;
+                    }
+                    case TILE_ELEMENT_TYPE_ENTRANCE:
+                    {
+                        auto entranceEl = el->AsEntrance();
+                        if (entranceEl->GetDirection() == d || entranceEl->GetDirection() == direction_reverse(d))
+                        {
+                            if (entranceEl->GetEntranceType() == ENTRANCE_TYPE_RIDE_ENTRANCE
+                                || entranceEl->GetEntranceType() == ENTRANCE_TYPE_RIDE_EXIT)
+                            {
+                                return ConnectedElement(loc, el);
+                            }
+                        }
+                        break;
                     }
                 }
             } while (!(el++)->IsLastForTile());
@@ -287,6 +429,9 @@ private:
 
     PathNode* Expand(CoordsXYZ coords, PathElement* el)
     {
+        if (el->IsQueue())
+            return nullptr;
+
         auto node = _nodes.nodeMap.Find(coords);
         if (node != nullptr)
             return node;
@@ -297,9 +442,57 @@ private:
             auto connectedElement = GetConnectedElement(node->coords, el, d);
             if (connectedElement)
             {
-                node->edges[d] = Expand(connectedElement->coords, connectedElement->element);
+                switch (connectedElement->element->GetType())
+                {
+                    case TILE_ELEMENT_TYPE_PATH:
+                    {
+                        auto pathEl = connectedElement->element->AsPath();
+                        if (pathEl->IsQueue())
+                        {
+                            // A ride entrance
+                            node->entrance[d].Ride = pathEl->GetRideIndex();
+                            node->entrance[d].Station = pathEl->GetStationIndex();
+                        }
+                        else
+                        {
+                            node->edges[d] = Expand(connectedElement->coords, pathEl);
+                        }
+                        break;
+                    }
+                    case TILE_ELEMENT_TYPE_ENTRANCE:
+                    {
+                        auto entranceEl = connectedElement->element->AsEntrance();
+                        if (entranceEl->GetEntranceType() == ENTRANCE_TYPE_RIDE_ENTRANCE)
+                        {
+                            // A ride entrance
+                            node->entrance[d].Ride = entranceEl->GetRideIndex();
+                            node->entrance[d].Station = entranceEl->GetStationIndex();
+                        }
+                        else if (entranceEl->GetEntranceType() == ENTRANCE_TYPE_RIDE_EXIT)
+                        {
+                            // A ride exit
+                            node->exit[d].Ride = entranceEl->GetRideIndex();
+                            node->exit[d].Station = entranceEl->GetStationIndex();
+                        }
+                        break;
+                    }
+                }
             }
         }
+
+#if DEBUG
+        for (auto d1 : ALL_DIRECTIONS)
+        {
+            for (auto d2 : ALL_DIRECTIONS)
+            {
+                if (d1 != d2)
+                {
+                    assert(node->entrance[d1] == RideStationId() || node->entrance[d1] != node->entrance[d2]);
+                    assert(node->exit[d1] == RideStationId() || node->exit[d1] != node->exit[d2]);
+                }
+            }
+        }
+#endif
 
         return node;
     }
@@ -373,6 +566,167 @@ private:
         }
     }
 
+    std::optional<RideStationId> GetRideNextStationExit(RideStationId rs)
+    {
+        const auto& rideManager = GetRideManager();
+        const auto ride = rideManager[rs.Ride];
+        if (ride != nullptr)
+        {
+            // TODO move this to ride helper
+            for (StationIndex i = 1; i <= MAX_STATIONS; i++)
+            {
+                auto stationIndex = (rs.Station + i) % MAX_STATIONS;
+                const auto& nextStation = ride->stations[stationIndex];
+                if (!nextStation.Exit.isNull())
+                {
+                    return RideStationId(ride->id, stationIndex);
+                }
+            }
+        }
+        return {};
+    }
+
+    PathNode* FindRideExitNode(RideStationId find)
+    {
+        for (auto node : _nodes.nodes)
+        {
+            for (const auto& rs : node->exit)
+            {
+                if (rs.Ride == find.Ride && rs.Station == find.Station)
+                {
+                    return node;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    void ExpandNav2()
+    {
+    }
+
+    bool DoesNodeHaveRideAssoc(PathNode* node)
+    {
+        for (auto rideEntrance : node->entrance)
+        {
+            if (rideEntrance.Ride != RIDE_ID_NULL)
+            {
+                return true;
+            }
+        }
+        for (auto rideExit : node->exit)
+        {
+            if (rideExit.Ride != RIDE_ID_NULL)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool ConnectNavNodes(ParkNavNode* a, ParkNavNode* b)
+    {
+        if (a == b)
+        {
+            return false;
+        }
+        if (a->HasEdgeTo(b))
+        {
+            return false;
+        }
+
+        ParkNavNode::Edge e;
+        e.Target = b;
+        a->edges.push_back(e);
+
+        e.Target = a;
+        b->edges.push_back(e);
+        return true;
+    }
+
+    void ExpandNav()
+    {
+        // Create nav node for each ride entrance and exit
+        for (auto node : _nodes.nodes)
+        {
+            if (DoesNodeHaveRideAssoc(node))
+            {
+                auto navNode = _parkNavNodes.Allocate(node->coords);
+                navNode->red = node;
+                node->blue = navNode;
+            }
+        }
+
+        // Now connect them
+        for (auto navNode : _parkNavNodes.nodes)
+        {
+            for (auto rideEntrance : navNode->red->entrance)
+            {
+                if (rideEntrance.Ride != RIDE_ID_NULL)
+                {
+                    auto rideExit = GetRideNextStationExit(rideEntrance);
+                    if (rideExit)
+                    {
+                        auto exitNode = FindRideExitNode(*rideExit);
+                        if (exitNode != nullptr)
+                        {
+                            auto target = _parkNavNodes.nodeMap.Find(exitNode->coords);
+                            if (target != nullptr)
+                            {
+                                ParkNavNode::Edge e;
+                                e.Target = target;
+                                e.ViaRide = rideExit->Ride;
+                                navNode->edges.push_back(e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ensure each node has 2 shortest connections
+        for (auto navNode : _parkNavNodes.nodes)
+        {
+            // Reset visited
+            for (auto node : _nodes.nodes)
+            {
+                node->navDone = false;
+            }
+            int32_t newConnections = 0;
+
+            std::queue<PathNode*> flood;
+            flood.push(navNode->red);
+            navNode->red->navDone = true;
+            while (!flood.empty())
+            {
+                auto node = flood.front();
+                flood.pop();
+
+                if (node->blue != nullptr)
+                {
+                    if (ConnectNavNodes(navNode, node->blue))
+                    {
+                        newConnections++;
+                        if (newConnections == 2)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                for (auto d : ALL_DIRECTIONS)
+                {
+                    auto next = node->edges[d];
+                    if (next != nullptr && !next->navDone)
+                    {
+                        next->navDone = true;
+                        flood.push(next);
+                    }
+                }
+            }
+        }
+    }
+
 public:
     PathGraph Generate()
     {
@@ -384,6 +738,7 @@ public:
             }
         }
         ExpandJunctions();
+        ExpandNav();
         DumpGraph("graph.graphml");
         return {};
     }
@@ -403,13 +758,17 @@ public:
         sb << "    <key id=\"d7\" for=\"node\" attr.name=\"NodeStyle\" "
               "y:attr.uri=\"http://www.yworks.com/xml/yfiles-common/2.0/NodeStyle\"/>\n";
         sb << "    <graph id=\"G\" edgedefault=\"directed\">\n";
-        for (auto n : _nodes.nodes)
+        // for (auto n : _nodes.nodes)
+        // {
+        //     DumpNode(sb, n, "n", "#FFFF0000");
+        // }
+        // for (auto n : _junctionNodes.nodes)
+        // {
+        //     DumpNode(sb, n, "j", "#FF0000FF");
+        // }
+        for (auto n : _parkNavNodes.nodes)
         {
-            DumpNode(sb, n, "n", "#FFFF0000");
-        }
-        for (auto n : _junctionNodes.nodes)
-        {
-            DumpNode(sb, n, "j", "#FF0000FF");
+            DumpNode(sb, n, "n", "#FF0000FF");
         }
         sb << "    </graph>\n";
         sb << "</graphml>\n";
@@ -434,12 +793,11 @@ public:
         sb << "                <yjs:ShapeNodeStyle stroke=\"" << colour << "\" fill=\"" << colour << "\" />\n";
         sb << "            </data>\n";
         sb << "        </node>\n";
-        for (auto d : ALL_DIRECTIONS)
+        auto numEdges = n->GetNumEdges();
+        for (size_t i = 0; i < numEdges; i++)
         {
-            if (n->edges[d] != nullptr)
-            {
-                sb << "        <edge source=\"" << type << n->id << "\" target=\"" << type << n->edges[d]->id << "\"/>\n";
-            }
+            auto id = n->GetEdgeTarget(i);
+            sb << "        <edge source=\"" << type << n->id << "\" target=\"" << type << id << "\"/>\n";
         }
     }
 };
