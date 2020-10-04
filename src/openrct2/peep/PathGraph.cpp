@@ -61,10 +61,12 @@ public:
     std::array<PathNode*, 4> edges;
     std::array<RideStationId, 4> entrance;
     std::array<RideStationId, 4> exit;
-    ParkNavNode* blue;
+    ParkNavNode* blue{};
+    uint8_t areaSize{};
+    bool isParkEntrance{};
     bool navDone{};
 
-    uint32_t GetEdgeTarget(size_t index)
+    PathNode* GetEdgeTarget(size_t index)
     {
         size_t c = 0;
         for (auto edge : edges)
@@ -73,12 +75,12 @@ public:
             {
                 if (c == index)
                 {
-                    return edge->id;
+                    return edge;
                 }
                 c++;
             }
         }
-        return std::numeric_limits<uint32_t>::max();
+        return nullptr;
     }
 
     size_t GetNumEdges()
@@ -98,7 +100,7 @@ class JunctionNode : public PathNodeBase<JunctionNode>
 public:
     std::array<JunctionNode*, 4> edges;
 
-    uint32_t GetEdgeTarget(size_t index)
+    JunctionNode* GetEdgeTarget(size_t index)
     {
         size_t c = 0;
         for (auto edge : edges)
@@ -107,12 +109,12 @@ public:
             {
                 if (c == index)
                 {
-                    return edge->id;
+                    return edge;
                 }
                 c++;
             }
         }
-        return std::numeric_limits<uint32_t>::max();
+        return nullptr;
     }
 
     size_t GetNumEdges()
@@ -151,9 +153,9 @@ public:
         return false;
     }
 
-    uint32_t GetEdgeTarget(size_t index) const
+    ParkNavNode* GetEdgeTarget(size_t index) const
     {
-        return edges[index].Target->id;
+        return edges[index].Target;
     }
 
     size_t GetNumEdges() const
@@ -404,6 +406,7 @@ private:
                         auto pathEl = el->AsPath();
                         if (pathEl != nullptr && IsValidPathZAndDirection(pathEl, loc.z, d))
                         {
+                            loc.z = el->GetBaseZ();
                             return ConnectedElement(loc, el);
                         }
                         break;
@@ -411,10 +414,17 @@ private:
                     case TILE_ELEMENT_TYPE_ENTRANCE:
                     {
                         auto entranceEl = el->AsEntrance();
-                        if (entranceEl->GetDirection() == d || entranceEl->GetDirection() == direction_reverse(d))
+                        auto entranceType = entranceEl->GetEntranceType();
+                        if (entranceType == ENTRANCE_TYPE_RIDE_ENTRANCE || entranceType == ENTRANCE_TYPE_RIDE_EXIT)
                         {
-                            if (entranceEl->GetEntranceType() == ENTRANCE_TYPE_RIDE_ENTRANCE
-                                || entranceEl->GetEntranceType() == ENTRANCE_TYPE_RIDE_EXIT)
+                            if (entranceEl->GetDirection() == d || entranceEl->GetDirection() == direction_reverse(d))
+                            {
+                                return ConnectedElement(loc, el);
+                            }
+                        }
+                        else if (entranceType == ENTRANCE_TYPE_PARK_ENTRANCE)
+                        {
+                            if (entranceEl->GetSequenceIndex() == 0)
                             {
                                 return ConnectedElement(loc, el);
                             }
@@ -425,6 +435,18 @@ private:
             } while (!(el++)->IsLastForTile());
         }
         return {};
+    }
+
+    PathNode* Expand(CoordsXYZ coords, EntranceElement* el)
+    {
+        assert(el->GetEntranceType() == ENTRANCE_TYPE_PARK_ENTRANCE);
+        auto node = _nodes.nodeMap.Find(coords);
+        if (node != nullptr)
+            return node;
+
+        node = _nodes.Allocate(coords);
+        node->isParkEntrance = true;
+        return node;
     }
 
     PathNode* Expand(CoordsXYZ coords, PathElement* el)
@@ -449,7 +471,6 @@ private:
                         auto pathEl = connectedElement->element->AsPath();
                         if (pathEl->IsQueue())
                         {
-                            // A ride entrance
                             node->entrance[d].Ride = pathEl->GetRideIndex();
                             node->entrance[d].Station = pathEl->GetStationIndex();
                         }
@@ -462,15 +483,18 @@ private:
                     case TILE_ELEMENT_TYPE_ENTRANCE:
                     {
                         auto entranceEl = connectedElement->element->AsEntrance();
-                        if (entranceEl->GetEntranceType() == ENTRANCE_TYPE_RIDE_ENTRANCE)
+                        auto entranceType = entranceEl->GetEntranceType();
+                        if (entranceType == ENTRANCE_TYPE_PARK_ENTRANCE)
                         {
-                            // A ride entrance
+                            node->edges[d] = Expand(connectedElement->coords, entranceEl);
+                        }
+                        else if (entranceType == ENTRANCE_TYPE_RIDE_ENTRANCE)
+                        {
                             node->entrance[d].Ride = entranceEl->GetRideIndex();
                             node->entrance[d].Station = entranceEl->GetStationIndex();
                         }
-                        else if (entranceEl->GetEntranceType() == ENTRANCE_TYPE_RIDE_EXIT)
+                        else if (entranceType == ENTRANCE_TYPE_RIDE_EXIT)
                         {
-                            // A ride exit
                             node->exit[d].Ride = entranceEl->GetRideIndex();
                             node->exit[d].Station = entranceEl->GetStationIndex();
                         }
@@ -497,6 +521,53 @@ private:
         return node;
     }
 
+    void ExpandNodes()
+    {
+        for (int32_t y = 0; y < gMapSize; y++)
+        {
+            for (int32_t x = 0; x < gMapSize; x++)
+            {
+                Expand(TileCoordsXY(x, y).ToCoordsXY());
+            }
+        }
+
+        // Calculate the width of footpaths
+        std::queue<PathNode*> qCurrent, qNext;
+        for (auto node : _nodes.nodes)
+        {
+            node->navDone = false;
+            if (node->GetNumEdges() < 4)
+            {
+                node->areaSize = 0;
+                node->navDone = true;
+                qNext.push(node);
+            }
+        }
+
+        int32_t distance = 1;
+        while (!qNext.empty())
+        {
+            qCurrent = std::move(qNext);
+            while (!qCurrent.empty())
+            {
+                auto node = qCurrent.front();
+                qCurrent.pop();
+
+                for (auto d : ALL_DIRECTIONS)
+                {
+                    auto next = node->edges[d];
+                    if (next != nullptr && !next->navDone)
+                    {
+                        next->areaSize = distance;
+                        next->navDone = true;
+                        qNext.push(next);
+                    }
+                }
+            }
+            distance++;
+        }
+    }
+
     void Expand(CoordsXY coords)
     {
         auto el = map_get_first_element_at(coords);
@@ -521,7 +592,7 @@ private:
             return result;
         }
 
-        if (target->GetNumEdges() != 2)
+        if (target->GetNumEdges() != 2 && target->areaSize == 0)
         {
             result = _junctionNodes.Allocate(target->coords);
 
@@ -649,7 +720,7 @@ private:
         // Create nav node for each ride entrance and exit
         for (auto node : _nodes.nodes)
         {
-            if (DoesNodeHaveRideAssoc(node))
+            if (node->isParkEntrance || DoesNodeHaveRideAssoc(node) || node->areaSize >= 3)
             {
                 auto navNode = _parkNavNodes.Allocate(node->coords);
                 navNode->red = node;
@@ -730,16 +801,10 @@ private:
 public:
     PathGraph Generate()
     {
-        for (int32_t y = 0; y < gMapSize; y++)
-        {
-            for (int32_t x = 0; x < gMapSize; x++)
-            {
-                Expand(TileCoordsXY(x, y).ToCoordsXY());
-            }
-        }
+        ExpandNodes();
         ExpandJunctions();
         ExpandNav();
-        DumpGraph("graph.graphml");
+        // DumpGraph("graph.graphml");
         return {};
     }
 
@@ -796,11 +861,83 @@ public:
         auto numEdges = n->GetNumEdges();
         for (size_t i = 0; i < numEdges; i++)
         {
-            auto id = n->GetEdgeTarget(i);
-            sb << "        <edge source=\"" << type << n->id << "\" target=\"" << type << id << "\"/>\n";
+            auto target = n->GetEdgeTarget(i);
+            if (target != nullptr)
+            {
+                auto id = target->id;
+                sb << "        <edge source=\"" << type << n->id << "\" target=\"" << type << id << "\"/>\n";
+            }
         }
     }
+
+    ScreenCoordsXY ConvertToScreenCoords(const rct_viewport* viewport, const CoordsXYZ& coords)
+    {
+        auto pos = translate_3d_to_2d_with_z(get_current_rotation(), coords.ToTileCentre());
+        pos -= viewport->viewPos;
+        pos.x = pos.x / viewport->zoom;
+        pos.y = pos.y / viewport->zoom;
+        return pos;
+    }
+
+    void Draw(const rct_viewport* viewport, rct_drawpixelinfo* dpi)
+    {
+        rct_drawpixelinfo dpi2;
+        if (clip_drawpixelinfo(&dpi2, dpi, viewport->pos, viewport->width, viewport->height))
+        {
+            DrawMiniGraph(viewport, &dpi2, _nodes, PALETTE_INDEX_61, 4);
+            DrawMiniGraph(viewport, &dpi2, _junctionNodes, PALETTE_INDEX_51, 6);
+            DrawMiniGraph(viewport, &dpi2, _parkNavNodes, PALETTE_INDEX_138, 8);
+        }
+    }
+
+    template<typename T>
+    void DrawMiniGraph(const rct_viewport* viewport, rct_drawpixelinfo* dpi, const T& pool, uint8_t colour, int32_t size)
+    {
+        // Edges
+        for (auto node : pool.nodes)
+        {
+            auto srcPos = ConvertToScreenCoords(viewport, node->coords);
+            auto numEdges = node->GetNumEdges();
+            for (size_t i = 0; i < numEdges; i++)
+            {
+                auto target = node->GetEdgeTarget(i);
+                if (target != nullptr)
+                {
+                    DrawEdge(viewport, dpi, node->coords, target->coords, colour);
+                }
+            }
+        }
+
+        // Nodes
+        for (auto node : pool.nodes)
+        {
+            DrawNode(viewport, dpi, node->coords, colour, size);
+        }
+    }
+
+    void DrawEdge(const rct_viewport* viewport, rct_drawpixelinfo* dpi, const CoordsXYZ& a, const CoordsXYZ& b, uint8_t colour)
+    {
+        auto srcPos = ConvertToScreenCoords(viewport, a);
+        auto dstPos = ConvertToScreenCoords(viewport, b);
+        ScreenLine line{ srcPos, dstPos };
+        gfx_draw_line(dpi, line, colour);
+    }
+
+    void DrawNode(const rct_viewport* viewport, rct_drawpixelinfo* dpi, const CoordsXYZ& coords, uint8_t colour, int32_t size)
+    {
+        auto nodeSize = size / viewport->zoom;
+        auto srcPos = ConvertToScreenCoords(viewport, coords);
+        ScreenRect rect{ srcPos.x - nodeSize, srcPos.y - nodeSize, srcPos.x + nodeSize, srcPos.y + nodeSize };
+        gfx_fill_rect(dpi, rect, PALETTE_INDEX_10);
+        rect.Point1.x++;
+        rect.Point1.y++;
+        rect.Point2.x--;
+        rect.Point2.y--;
+        gfx_fill_rect(dpi, rect, colour);
+    }
 };
+
+static GraphBuilder _graphBuilder;
 
 void GuestPathfinding::Update()
 {
@@ -808,9 +945,15 @@ void GuestPathfinding::Update()
     {
         GraphBuilder builder;
         _pathGraph = builder.Generate();
+        _graphBuilder = std::move(builder);
     }
     else
     {
         _lastGenerate++;
     }
+}
+
+void GuestPathfinding::Draw(const rct_viewport* viewport, rct_drawpixelinfo* dpi)
+{
+    _graphBuilder.Draw(viewport, dpi);
 }

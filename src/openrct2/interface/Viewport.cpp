@@ -19,6 +19,7 @@
 #include "../drawing/Drawing.h"
 #include "../drawing/IDrawingEngine.h"
 #include "../paint/Paint.h"
+#include "../peep/PathGraph.h"
 #include "../peep/Staff.h"
 #include "../ride/Ride.h"
 #include "../ride/TrackDesign.h"
@@ -103,7 +104,7 @@ void viewport_init_all()
  * out_x : ax
  * out_y : bx
  */
-std::optional<ScreenCoordsXY> centre_2d_coordinates(const CoordsXYZ& loc, rct_viewport* viewport)
+std::optional<ScreenCoordsXY> centre_2d_coordinates(const CoordsXYZ& loc, const rct_viewport* viewport)
 {
     // If the start location was invalid
     // propagate the invalid location to the output.
@@ -1012,6 +1013,8 @@ void viewport_paint(
     {
         viewport_paint_column(column);
     }
+
+    OpenRCT2::GuestPathfinding::Draw(viewport, dpi);
 }
 
 static void viewport_paint_weather_gloom(rct_drawpixelinfo* dpi)
