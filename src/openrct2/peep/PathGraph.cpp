@@ -325,9 +325,11 @@ public:
 
 template<typename T> class NodePool
 {
+private:
+    QuadTree<T> nodeMap;
+
 public:
     std::vector<T*> nodes;
-    QuadTree<T> nodeMap;
 
     T* Allocate(CoordsXYZ coords)
     {
@@ -337,6 +339,11 @@ public:
         node->coords = coords;
         nodeMap.Add(node);
         return node;
+    }
+
+    T* Find(CoordsXYZ coords)
+    {
+        return nodeMap.Find(coords);
     }
 };
 
@@ -470,7 +477,7 @@ private:
     {
         assert(el->GetEntranceType() == ENTRANCE_TYPE_PARK_ENTRANCE);
         assert(el->GetSequenceIndex() == 0);
-        auto node = _nodes.nodeMap.Find(coords);
+        auto node = _nodes.Find(coords);
         if (node != nullptr)
             return node;
 
@@ -484,7 +491,7 @@ private:
         if (el->IsQueue())
             return nullptr;
 
-        auto node = _nodes.nodeMap.Find(coords);
+        auto node = _nodes.Find(coords);
         if (node != nullptr)
             return node;
 
@@ -512,7 +519,7 @@ private:
                         }
                         else
                         {
-                            auto neighbour = _nodes.nodeMap.Find(connectedElement->coords);
+                            auto neighbour = _nodes.Find(connectedElement->coords);
                             if (neighbour != nullptr)
                             {
                                 node->edges[d] = neighbour;
@@ -527,7 +534,7 @@ private:
                         auto entranceType = entranceEl->GetEntranceType();
                         if (entranceType == ENTRANCE_TYPE_PARK_ENTRANCE)
                         {
-                            auto neighbour = _nodes.nodeMap.Find(connectedElement->coords);
+                            auto neighbour = _nodes.Find(connectedElement->coords);
                             if (neighbour != nullptr)
                             {
                                 node->edges[d] = neighbour;
@@ -658,7 +665,7 @@ private:
                 auto neighbour = node->edges[d];
                 if (neighbour != nullptr)
                 {
-                    if (_junctionNodes.nodeMap.Find(neighbour->coords))
+                    if (_junctionNodes.Find(neighbour->coords))
                         numJunctionNeighbours++;
                 }
             }
@@ -695,7 +702,7 @@ private:
             stack.pop();
 
             // Is this node a junction?
-            auto result = _junctionNodes.nodeMap.Find(next->coords);
+            auto result = _junctionNodes.Find(next->coords);
             if (result != nullptr)
             {
                 return result;
@@ -867,7 +874,7 @@ private:
                         auto exitNode = FindRideExitNode(*rideExit);
                         if (exitNode != nullptr)
                         {
-                            auto target = _parkNavNodes.nodeMap.Find(exitNode->coords);
+                            auto target = _parkNavNodes.Find(exitNode->coords);
                             if (target != nullptr)
                             {
                                 ParkNavNode::Edge e;
