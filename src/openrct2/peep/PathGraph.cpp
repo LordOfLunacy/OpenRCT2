@@ -10,6 +10,7 @@
 #include <optional>
 #include <queue>
 #include <sstream>
+#include <stack>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -23,6 +24,7 @@ class PathGraph
 static uint32_t _lastGenerate;
 static PathGraph _pathGraph;
 
+class JunctionNode;
 class ParkNavNode;
 
 template<typename T> class PathNodeBase
@@ -61,12 +63,13 @@ public:
     std::array<PathNode*, 4> edges;
     std::array<RideStationId, 4> entrance;
     std::array<RideStationId, 4> exit;
+    JunctionNode* yellow{};
     ParkNavNode* blue{};
     uint8_t areaSize{};
     bool isParkEntrance{};
     bool navDone{};
 
-    PathNode* GetEdgeTarget(size_t index)
+    PathNode* GetEdgeTarget(size_t index) const
     {
         size_t c = 0;
         for (auto edge : edges)
@@ -83,7 +86,7 @@ public:
         return nullptr;
     }
 
-    size_t GetNumEdges()
+    size_t GetNumEdges() const
     {
         size_t c = 0;
         for (auto edge : edges)
@@ -98,6 +101,7 @@ public:
 class JunctionNode : public PathNodeBase<JunctionNode>
 {
 public:
+    PathNode* red{};
     std::array<JunctionNode*, 4> edges;
 
     JunctionNode* GetEdgeTarget(size_t index)
@@ -437,9 +441,35 @@ private:
         return {};
     }
 
+    void Expand(CoordsXY coords)
+    {
+        auto el = map_get_first_element_at(coords);
+        if (el != nullptr)
+        {
+            do
+            {
+                auto pathElement = el->AsPath();
+                if (pathElement != nullptr)
+                {
+                    Expand(CoordsXYZ(coords, pathElement->GetBaseZ()), pathElement);
+                }
+                else
+                {
+                    auto entranceElement = el->AsEntrance();
+                    if (entranceElement != nullptr && entranceElement->GetEntranceType() == ENTRANCE_TYPE_PARK_ENTRANCE
+                        && entranceElement->GetSequenceIndex() == 0)
+                    {
+                        Expand(CoordsXYZ(coords, entranceElement->GetBaseZ()), entranceElement);
+                    }
+                }
+            } while (!(el++)->IsLastForTile());
+        }
+    }
+
     PathNode* Expand(CoordsXYZ coords, EntranceElement* el)
     {
         assert(el->GetEntranceType() == ENTRANCE_TYPE_PARK_ENTRANCE);
+        assert(el->GetSequenceIndex() == 0);
         auto node = _nodes.nodeMap.Find(coords);
         if (node != nullptr)
             return node;
@@ -461,6 +491,12 @@ private:
         node = _nodes.Allocate(coords);
         for (auto d : ALL_DIRECTIONS)
         {
+            // Edge already set, must have been a footpath
+            if (node->edges[d] != nullptr)
+            {
+                continue;
+            }
+
             auto connectedElement = GetConnectedElement(node->coords, el, d);
             if (connectedElement)
             {
@@ -476,7 +512,12 @@ private:
                         }
                         else
                         {
-                            node->edges[d] = Expand(connectedElement->coords, pathEl);
+                            auto neighbour = _nodes.nodeMap.Find(connectedElement->coords);
+                            if (neighbour != nullptr)
+                            {
+                                node->edges[d] = neighbour;
+                                neighbour->edges[direction_reverse(d)] = node;
+                            }
                         }
                         break;
                     }
@@ -486,7 +527,12 @@ private:
                         auto entranceType = entranceEl->GetEntranceType();
                         if (entranceType == ENTRANCE_TYPE_PARK_ENTRANCE)
                         {
-                            node->edges[d] = Expand(connectedElement->coords, entranceEl);
+                            auto neighbour = _nodes.nodeMap.Find(connectedElement->coords);
+                            if (neighbour != nullptr)
+                            {
+                                node->edges[d] = neighbour;
+                                neighbour->edges[direction_reverse(d)] = node;
+                            }
                         }
                         else if (entranceType == ENTRANCE_TYPE_RIDE_ENTRANCE)
                         {
@@ -568,71 +614,155 @@ private:
         }
     }
 
-    void Expand(CoordsXY coords)
+    bool CanBeJunction(const PathNode* node)
     {
-        auto el = map_get_first_element_at(coords);
-        if (el != nullptr)
+        bool edges[4]{};
+        PathNode* corners[4][2]{};
+        int32_t numEdges = 0;
+        for (auto d : ALL_DIRECTIONS)
         {
-            do
+            auto forward = node->edges[d];
+            if (forward != nullptr)
             {
-                auto pathElement = el->AsPath();
-                if (pathElement != nullptr)
-                {
-                    Expand(CoordsXYZ(coords, pathElement->GetBaseZ()), pathElement);
-                }
-            } while (!(el++)->IsLastForTile());
-        }
-    }
-
-    JunctionNode* ExpandJunction(PathNode* src, PathNode* target)
-    {
-        auto result = _junctionNodes.nodeMap.Find(target->coords);
-        if (result != nullptr)
-        {
-            return result;
+                edges[d] = true;
+                corners[d][0] = forward->edges[direction_prev(d)];
+                corners[d][1] = forward->edges[direction_next(d)];
+                numEdges++;
+            }
         }
 
-        if (target->GetNumEdges() != 2 && target->areaSize == 0)
+        int32_t numCorners = 0;
+        auto singleEdge = false;
+        for (auto d : ALL_DIRECTIONS)
         {
-            result = _junctionNodes.Allocate(target->coords);
+            auto left = corners[d][0] != nullptr && corners[d][0] == corners[direction_prev(d)][1];
+            auto right = corners[d][1] != nullptr && corners[d][1] == corners[direction_next(d)][0];
+            if (right)
+                numCorners++;
+            if (edges[d] && !left && !right)
+            {
+                singleEdge = true;
+            }
+        }
 
-            // Expand to edges
+        // return node->GetNumEdges() != 2 && total <= 4;
+        if (node->GetNumEdges() != 2 && singleEdge)
+            return true;
+
+        auto total = numEdges + numCorners;
+        if (total == 7)
+        {
+            int32_t numJunctionNeighbours = 0;
             for (auto d : ALL_DIRECTIONS)
             {
-                auto edge = target->edges[d];
-                if (edge != nullptr)
+                auto neighbour = node->edges[d];
+                if (neighbour != nullptr)
                 {
-                    result->edges[d] = ExpandJunction(target, edge);
+                    if (_junctionNodes.nodeMap.Find(neighbour->coords))
+                        numJunctionNeighbours++;
                 }
+            }
+            if (numJunctionNeighbours == 0)
+                return true;
+        }
+
+        return false;
+    }
+
+    JunctionNode* FindNextJunction(PathNode* startNode, Direction d)
+    {
+        // Check if direction goes anywhere
+        auto forward = startNode->edges[d];
+        if (forward == nullptr)
+        {
+            return nullptr;
+        }
+
+        // Reset visited flags
+        for (auto node : _nodes.nodes)
+        {
+            node->navDone = false;
+        }
+
+        // Start search
+        std::stack<PathNode*> stack;
+        forward->navDone = true;
+        stack.push(forward);
+
+        while (!stack.empty())
+        {
+            auto next = stack.top();
+            stack.pop();
+
+            // Is this node a junction?
+            auto result = _junctionNodes.nodeMap.Find(next->coords);
+            if (result != nullptr)
+            {
+                return result;
             }
 
-            assert(result->GetNumEdges() == target->GetNumEdges());
-            return result;
-        }
-        else
-        {
-            // Tail recurse to next connected node
-            PathNode* newTarget = nullptr;
-            for (auto edge : target->edges)
+            // Push behind
+            auto n = next->edges[direction_reverse(d)];
+            if (n != nullptr && !n->navDone)
             {
-                if (edge != nullptr && edge != src)
-                {
-                    newTarget = edge;
-                    break;
-                }
+                n->navDone = true;
+                stack.push(n);
             }
-            assert(newTarget != nullptr);
-            return ExpandJunction(target, newTarget);
+
+            // Push left
+            n = next->edges[direction_prev(d)];
+            if (n != nullptr && !n->navDone)
+            {
+                n->navDone = true;
+                stack.push(n);
+            }
+
+            // Push right
+            n = next->edges[direction_next(d)];
+            if (n != nullptr && !n->navDone)
+            {
+                n->navDone = true;
+                stack.push(n);
+            }
+
+            // Push fowards
+            n = next->edges[d];
+            if (n != nullptr && !n->navDone)
+            {
+                n->navDone = true;
+                stack.push(n);
+            }
         }
+        return nullptr;
     }
 
     void ExpandJunctions()
     {
+        std::queue<JunctionNode*> expandQueue;
         for (auto node : _nodes.nodes)
         {
-            if (node->GetNumEdges() != 2)
+            if (CanBeJunction(node))
             {
-                ExpandJunction(nullptr, node);
+                auto jn = _junctionNodes.Allocate(node->coords);
+                jn->red = node;
+                node->yellow = jn;
+                expandQueue.push(jn);
+            }
+        }
+
+        while (!expandQueue.empty())
+        {
+            auto jn = expandQueue.front();
+            expandQueue.pop();
+
+            // Connect up edges
+            for (auto d : ALL_DIRECTIONS)
+            {
+                auto next = FindNextJunction(jn->red, d);
+                if (next != nullptr)
+                {
+                    jn->edges[d] = next;
+                }
             }
         }
     }
@@ -670,10 +800,6 @@ private:
             }
         }
         return nullptr;
-    }
-
-    void ExpandNav2()
-    {
     }
 
     bool DoesNodeHaveRideAssoc(PathNode* node)
@@ -720,7 +846,7 @@ private:
         // Create nav node for each ride entrance and exit
         for (auto node : _nodes.nodes)
         {
-            if (node->isParkEntrance || DoesNodeHaveRideAssoc(node) || node->areaSize >= 3)
+            if (node->isParkEntrance || DoesNodeHaveRideAssoc(node) /* || node->areaSize >= 3 */)
             {
                 auto navNode = _parkNavNodes.Allocate(node->coords);
                 navNode->red = node;
